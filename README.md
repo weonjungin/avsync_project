@@ -1,5 +1,3 @@
----
-
 # Setup & Usage
 
 ## 1. 데이터 준비
@@ -32,28 +30,3 @@ python scripts/inference_syncnet.py
 ```
 
 ---
-
-# Environment Setup (Conda)
-
-```bash
-# Create environment
-conda create -n avsync2 python=3.10
-conda activate avsync2
-
-# Install PyTorch (CUDA 11.8)
-conda install pytorch torchvision torchaudio cudatoolkit=11.8 -c pytorch -c nvidia
-
-# Install dependencies
-pip install numpy==1.26.4
-pip install retina-face
-pip install pandas
-pip install git+https://github.com/serengil/retinaface.git
-pip install insightface
-pip install onnxruntime
-pip install opencv-python
-pip install yt-dlp
-pip install librosa
-```
-
----
-
