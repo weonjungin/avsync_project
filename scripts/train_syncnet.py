@@ -73,6 +73,18 @@ def main():
     # Dataset
     # -------------------------
     dataset = DatasetSyncNet(data_root)
+
+    valid_samples = []
+    for i in range(len(dataset)):
+        try:
+            _ = dataset[i]   # 한 번 로딩해보고
+            valid_samples.append(dataset.samples[i])
+        except Exception as e:
+            print("⚠ Skip:", dataset.samples[i], "| Reason:", e)
+
+    dataset.samples = valid_samples
+    print(f"Valid dataset size: {len(dataset.samples)} samples")
+
     dataloader = DataLoader(dataset, batch_size=batch_size,
                             shuffle=True, num_workers=0)
 
