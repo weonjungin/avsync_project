@@ -29,4 +29,34 @@ python scripts/train_syncnet.py
 python scripts/inference_syncnet.py
 ```
 
+
+---
+
+## Create environment
+
+```bash
+conda create -n avsync2 python=3.10
+conda activate avsync2
+```
+
+## Install PyTorch (CUDA 11.8)
+
+```bash
+conda install pytorch torchvision torchaudio cudatoolkit=11.8 -c pytorch -c nvidia
+```
+
+## Install dependencies
+
+```bash
+pip install numpy==1.26.4
+pip install retina-face
+pip install pandas
+pip install git+https://github.com/serengil/retinaface.git
+pip install insightface
+pip install onnxruntime
+pip install opencv-python
+pip install yt-dlp
+pip install librosa
+```
+
 ---
