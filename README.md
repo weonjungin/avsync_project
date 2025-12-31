@@ -7,8 +7,8 @@
 mkdir data
 
 # AVSpeech CSV 다운로드 후 아래 위치에 저장
-# data/avspeech_train.csv
-# data/avspeech_test.csv
+# data/raw/avspeech_train.csv
+# data/raw/avspeech_test.csv
 ```
 
 ## 2. AVSpeech 데이터 전처리
