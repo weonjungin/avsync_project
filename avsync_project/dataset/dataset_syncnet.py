@@ -71,8 +71,4 @@ class DatasetSyncNet(Dataset):
         lips_all = self.load_lips(lips_dir)   # (T, 3, 96, 96)
         mel = self.load_mel(mel_path)         # (80, mel_len)
 
-        # 랜덤 lip 프레임 선택
-        frame_idx = random.randint(0, lips_all.shape[0] - 1)
-        lips = lips_all[frame_idx]            # (3, 96, 96)
-
-        return lips, mel, sample_dir
+        return lips_all, mel, sample_dir

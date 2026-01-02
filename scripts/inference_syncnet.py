@@ -13,6 +13,8 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from avsync_project.models.syncnet_model import SyncNet
 
+from pathlib import Path
+import yaml
 
 # ---------------------------------------
 # Load lips frames
@@ -62,8 +64,8 @@ def load_mel(mel_path: str, mel_len: int = 16) -> torch.Tensor:
 @torch.no_grad()
 def compute_score(model: SyncNet, lips: torch.Tensor, mel: torch.Tensor, device: str) -> float:
     model.eval()
-    # lips: (T,3,96,96) -> (1,3,96,96) by mean pooling
-    lips = lips.mean(dim=0, keepdim=True)
+    # lips: (T,3,96,96) -> (1,T,3,96,96)
+    lips = lips.unsqueeze(0)
     mel = mel.unsqueeze(0)  # (1,80,T)
 
     lips = lips.to(device)
@@ -93,10 +95,19 @@ def pick_negative_sample(all_samples, exclude_sd: str) -> str:
         cand = random.choice(all_samples)
         if cand != exclude_sd:
             return cand
+        
+def _load_yaml(path: str):
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        proj_root = Path(__file__).resolve().parents[1]  
+        p = (proj_root / p).resolve()
+    with open(p, "r") as f:
+        return yaml.safe_load(f)
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="configs/exp.yaml")
     parser.add_argument("--root", default="data/train", help="sample root dir")
     parser.add_argument("--ckpt", default="logs/checkpoints/syncnet_ckpt.pth", help="checkpoint path")
     parser.add_argument("--sample", default="", help="run only one sample dir (optional)")
@@ -107,6 +118,37 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="random seed for negative sampling")
     parser.add_argument("--save_csv", default="logs/inference_scores_with_neg.csv")
     args = parser.parse_args()
+
+    # -------------------------
+    # Apply YAML config
+    # -------------------------
+    cfg = _load_yaml(args.config) if args.config else {}
+
+    # dataset.root
+    if "dataset" in cfg and "root" in cfg["dataset"]:
+        args.root = cfg["dataset"]["root"]
+
+    # paths.ckpt
+    if "paths" in cfg and "ckpt" in cfg["paths"]:
+        args.ckpt = cfg["paths"]["ckpt"]
+
+    # common
+    if "common" in cfg:
+        c = cfg["common"]
+        if "seed" in c:
+            args.seed = c["seed"]
+        if "num_frames" in c:
+            args.num_frames = c["num_frames"]
+        if "mel_len" in c:
+            args.mel_len = c["mel_len"]
+
+    # inference
+    if "inference" in cfg:
+        inf = cfg["inference"]
+        for k in ["max_samples", "neg_k", "save_csv", "sample"]:
+            if k in inf:
+                setattr(args, k, inf[k])
+
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -173,6 +215,7 @@ def main():
                 "neg_mean": neg_mean,
                 "margin": margin,
                 "neg_k": int(max(1, args.neg_k)),
+                "neg_scores": ",".join([f"{v:.6f}" for v in neg_scores]),
             })
 
             if args.sample:
@@ -192,7 +235,23 @@ def main():
 
     # Save csv
     os.makedirs(os.path.dirname(args.save_csv), exist_ok=True)
-    df = pd.DataFrame(results).sort_values("margin", ascending=False)
+    df = pd.DataFrame(results)
+
+    # 아무것도 처리된 게 없으면 여기서 종료
+    if df.empty:
+        print("No inference results to summarize (all samples skipped or failed).")
+        return
+
+    # margin 컬럼이 없으면 만들어주기 (안전장치)
+    if "margin" not in df.columns:
+        if ("pos" in df.columns) and ("neg_mean" in df.columns):
+            df["margin"] = df["pos"] - df["neg_mean"]
+        else:
+            print("Results exist but missing required columns for margin:", df.columns.tolist())
+            return
+
+    df = df.sort_values("margin", ascending=False)
+
     df.to_csv(args.save_csv, index=False)
     print(f"Saved: {args.save_csv}")
 

@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Data & logs (절대 GitHub에 올리지 않음)
+data/
+logs/
+*.pth
+*.csv
+
+# Environment
+.env

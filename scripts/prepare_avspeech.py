@@ -9,6 +9,8 @@ from tqdm import tqdm
 from insightface.app import FaceAnalysis
 import librosa
 import shutil
+from pathlib import Path
+import yaml
 
 
 # ---------------------------------------
@@ -337,14 +339,46 @@ def process_one_row(row, detector, out_root, min_lip_frames=25, max_multi_face_r
 # ---------------------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", required=True)
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--csv", type=str, default=None)
+    parser.add_argument("--out", type=str, default=None)
     parser.add_argument("--limit", type=int, default=None)
-
-    # Option 1 관련 파라미터
     parser.add_argument("--min_lip_frames", type=int, default=25)
 
+    def _load_yaml(path: str):
+        p = Path(path).expanduser()
+
+        if not p.is_absolute():
+            proj_root = Path(__file__).resolve().parents[1]
+            p = (proj_root / p).resolve()
+        with open(p, "r") as f:
+            return yaml.safe_load(f)
+
     args = parser.parse_args()
+
+    # YAML config
+    if args.config:
+        cfg = _load_yaml(args.config)
+
+        if args.csv is None and "dataset" in cfg and "csv" in cfg["dataset"]:
+            args.csv = cfg["dataset"]["csv"]
+
+        prep = cfg.get("prepare", {})
+
+        if args.out is None and "out" in prep:
+            args.out = prep["out"]
+
+        if args.limit is None and "limit" in prep:
+            args.limit = prep["limit"]
+
+        if "min_lip_frames" in prep and args.min_lip_frames == 25:
+            args.min_lip_frames = prep["min_lip_frames"]
+
+    # 필수값 체크
+    if args.csv is None:
+        raise ValueError("csv가 필요합니다. --csv 또는 --config의 dataset.csv를 지정하세요.")
+    if args.out is None:
+        raise ValueError("out이 필요합니다. --out 또는 --config의 prepare.out을 지정하세요.")
 
     df = pd.read_csv(args.csv)
 

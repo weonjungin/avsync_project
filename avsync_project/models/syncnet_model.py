@@ -90,13 +90,17 @@ class SyncNet(nn.Module):
         self.audio_encoder = AudioEncoder(embed_dim)
 
     def forward(self, lips, mels):
-        """
-        lips : (B, 3, 96, 96)
-        mels : (B, 80, T)
-        """
-        lip_feat = self.lip_encoder(lips)
-        mel_feat = self.audio_encoder(mels)
+        if lips.dim() == 5:
+            # (B,T,3,96,96) -> (B*T,3,96,96)
+            B, T, C, H, W = lips.shape
+            lips_ = lips.view(B * T, C, H, W)
+            lip_feat_ = self.lip_encoder(lips_)       # (B*T, D)
+            lip_feat_ = lip_feat_.view(B, T, -1)      # (B, T, D)
+            lip_feat = lip_feat_.mean(dim=1)          # (B, D) mean temporal pooling
+        else:
+            lip_feat = self.lip_encoder(lips)         # (B, D)
 
+        mel_feat = self.audio_encoder(mels)           # (B, D)
         return lip_feat, mel_feat
 
     def similarity(self, lips, mels):

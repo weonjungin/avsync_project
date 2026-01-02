@@ -1,0 +1,43 @@
+dataset:
+  root: data/avspeech_full_me25
+  csv: data/raw/avspeech/avspeech_train.csv
+
+paths:
+  ckpt: logs/checkpoints/syncnet_ckpt.pth
+
+common:
+  seed: 42
+  num_frames: 25
+  mel_len: 16
+
+prepare:
+  out: data/avspeech_full_me25
+  limit: null
+  min_lip_frames: 25
+
+train:
+  batch_size: 8
+  lr: 1e-4
+  epochs: 30
+  temperature: 0.07
+  hard_k: 5
+  save_dir: logs/checkpoints
+  ckpt_name: syncnet_ckpt.pth
+
+eval:
+  do_pair: true
+  do_rank: true
+  do_offset: false
+
+  neg_k: 5
+  rank_ks: [1, 5, 10]
+  offsets: [-5,-4,-3,-2,-1,0,1,2,3,4,5]
+
+  save_csv: logs/eval_scores_full.csv
+  save_offset_csv: logs/eval_offsets_full.csv
+
+inference:
+  max_samples: 50
+  neg_k: 5
+  save_csv: logs/inference_scores_full.csv
+  sample: ""   # optional
