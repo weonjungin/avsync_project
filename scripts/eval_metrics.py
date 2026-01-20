@@ -2,6 +2,9 @@ import os
 import glob
 import argparse
 import random
+import re
+from pathlib import Path
+import yaml
 
 import torch
 import numpy as np
@@ -13,14 +16,96 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from avsync_project.models.syncnet_model import SyncNet
 
-from pathlib import Path
-import yaml
+
+# ---------------------------------------
+# Utils: YAML
+# ---------------------------------------
+def _load_yaml(path: str):
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        proj_root = Path(__file__).resolve().parents[1]
+        p = (proj_root / p).resolve()
+    with open(p, "r") as f:
+        return yaml.safe_load(f)
 
 
 # ---------------------------------------
-# Load lips frames
+# Speaker split (GRID: s1_processed ~ s34_processed)
 # ---------------------------------------
-def load_lips(lips_dir: str, num_frames: int = 5) -> torch.Tensor:
+def extract_speaker_id(sample_dir: str) -> str:
+    parts = sample_dir.replace("\\", "/").split("/")
+    for p in parts:
+        m = re.match(r"^(s\d+)_processed$", p)  # s10_processed
+        if m:
+            return m.group(1)  # s10
+        m = re.match(r"^(s\d+)$", p)
+        if m:
+            return m.group(1)
+    raise ValueError(f"Cannot parse speaker id from: {sample_dir}")
+
+
+def split_by_speaker_count(samples, seed=42, n_train=28, n_val=3):
+    spk_to_samples = {}
+    for s in samples:
+        spk = extract_speaker_id(s)
+        spk_to_samples.setdefault(spk, []).append(s)
+
+    speakers = sorted(spk_to_samples.keys())
+    rng = random.Random(seed)
+    rng.shuffle(speakers)
+
+    if len(speakers) < (n_train + n_val + 1):
+        raise ValueError(f"Not enough speakers: got {len(speakers)}, need >= {n_train + n_val + 1}")
+
+    train_spk = speakers[:n_train]
+    val_spk = speakers[n_train:n_train + n_val]
+    test_spk = speakers[n_train + n_val:]
+
+    def gather(spk_list):
+        out = []
+        for spk in spk_list:
+            out.extend(spk_to_samples[spk])
+        return out
+
+    return gather(train_spk), gather(val_spk), gather(test_spk), (train_spk, val_spk, test_spk)
+
+
+# ---------------------------------------
+# Collect samples recursively (GRID 구조 대응)
+# sample_dir 내부에 lips/ 와 mel.npy가 있어야 유효
+# ---------------------------------------
+def collect_sample_dirs(root: str):
+    root = os.path.abspath(root)
+    mel_paths = glob.glob(os.path.join(root, "**", "mel.npy"), recursive=True)
+
+    sample_dirs = []
+    for mp in mel_paths:
+        sd = os.path.dirname(mp)
+        lips_dir = os.path.join(sd, "lips")
+        if os.path.isdir(lips_dir) and len(glob.glob(os.path.join(lips_dir, "*.png"))) > 0:
+            sample_dirs.append(sd)
+
+    sample_dirs = sorted(set(sample_dirs))
+    return sample_dirs
+
+
+def is_valid_sample(sample_dir: str) -> bool:
+    lips_dir = os.path.join(sample_dir, "lips")
+    mel_path = os.path.join(sample_dir, "mel.npy")
+    if not os.path.isdir(lips_dir):
+        return False
+    if not os.path.isfile(mel_path):
+        return False
+    if len(glob.glob(os.path.join(lips_dir, "*.png"))) == 0:
+        return False
+    return True
+
+
+# ---------------------------------------
+# Load lips frames (match training: grayscale 1-channel)
+# returns (T, 1, 96, 96)
+# ---------------------------------------
+def load_lips(lips_dir: str, num_frames: int = 5, size: int = 96) -> torch.Tensor:
     frame_paths = sorted(glob.glob(os.path.join(lips_dir, "*.png")))
     if len(frame_paths) == 0:
         raise ValueError(f"No lips frames found in {lips_dir}")
@@ -31,41 +116,19 @@ def load_lips(lips_dir: str, num_frames: int = 5) -> torch.Tensor:
 
     imgs = []
     for f in frame_paths:
-        img = Image.open(f).convert("RGB")
-        img = img.resize((96, 96))
-        img = torch.from_numpy(np.array(img)).float() / 255.0
-        img = img.permute(2, 0, 1)  # (3, 96, 96)
-        imgs.append(img)
+        img = Image.open(f).convert("L")        # grayscale
+        img = img.resize((size, size))
+        arr = np.array(img).astype(np.float32) / 255.0  # (H,W)
+        t = torch.from_numpy(arr).unsqueeze(0)          # (1,H,W)
+        imgs.append(t)
 
-    return torch.stack(imgs)  # (T, 3, 96, 96)
-
-
-# ---------------------------------------
-# Load mel (80, T) + crop/pad to mel_len (center crop)
-# ---------------------------------------
-def load_mel(mel_path: str, mel_len: int = 16) -> torch.Tensor:
-    mel = np.load(mel_path)  # (80, T)
-    mel = torch.from_numpy(mel).float()
-
-    if mel.ndim != 2 or mel.shape[0] != 80:
-        raise ValueError(f"Bad mel shape: {tuple(mel.shape)} in {mel_path}")
-
-    T = mel.size(1)
-    if T < mel_len:
-        pad = mel_len - T
-        mel = torch.cat([mel, torch.zeros(80, pad)], dim=1)
-        mel = mel[:, :mel_len]
-    elif T > mel_len:
-        start = (T - mel_len) // 2  # deterministic center crop
-        mel = mel[:, start:start + mel_len]
-
-    return mel  # (80, mel_len)
+    return torch.stack(imgs, dim=0)  # (T, 1, 96, 96)
 
 
 # ---------------------------------------
-# Load full mel (80, T) without cropping
+# mel helpers
 # ---------------------------------------
-def load_mel_full(mel_path: str) -> np.ndarray:
+def load_mel_full_np(mel_path: str) -> np.ndarray:
     mel = np.load(mel_path)
     if mel.ndim != 2 or mel.shape[0] != 80:
         raise ValueError(f"Bad mel shape: {tuple(mel.shape)} in {mel_path}")
@@ -73,7 +136,10 @@ def load_mel_full(mel_path: str) -> np.ndarray:
 
 
 def crop_pad_mel_np(mel: np.ndarray, mel_len: int = 16) -> np.ndarray:
-    """Take first mel_len frames after any shift. Deterministic."""
+    """
+    Deterministic: take FIRST mel_len frames (after any shift).
+    Stable + simple.
+    """
     T = mel.shape[1]
     if T < mel_len:
         pad = mel_len - T
@@ -89,6 +155,7 @@ def shift_mel_np(mel: np.ndarray, shift: int) -> np.ndarray:
     mel: (80, T)
     shift > 0: move right (pad zeros at beginning)  -> audio delayed
     shift < 0: move left  (pad zeros at end)        -> audio advanced
+    shift is in "mel frames index"
     """
     if shift == 0:
         return mel
@@ -105,170 +172,137 @@ def shift_mel_np(mel: np.ndarray, shift: int) -> np.ndarray:
     return out
 
 
+def mel_per_vframe(fps: float, sr: int, hop: int) -> float:
+    return (sr / float(hop)) / float(fps)
+
+
+def load_meta_defaults(sample_dir: str):
+    """
+    meta.json이 있으면 fps/sr/hop 읽고,
+    없으면 (fps=25, sr=16000, hop=160) 가정.
+    """
+    meta_path = os.path.join(sample_dir, "meta.json")
+    fps, sr, hop = 25.0, 16000, 160
+
+    if os.path.isfile(meta_path):
+        try:
+            import json
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            fps = float(meta.get("fps", fps))
+            sr = int(meta.get("sr", sr))
+            hop = int(meta.get("hop_length", meta.get("hop", hop)))
+        except Exception:
+            pass
+    return fps, sr, hop
+
+
+def mel_clip_at_offset_frames(sample_dir: str, mel_full: np.ndarray, mel_len: int, off_frames: int) -> np.ndarray:
+    """
+    off_frames: video frame offset (e.g., -5..+5)
+    convert to mel index shift using fps/sr/hop then shift mel and take first mel_len frames.
+    """
+    fps, sr, hop = load_meta_defaults(sample_dir)
+    m_per_v = mel_per_vframe(fps, sr, hop)
+    shift_mel = int(round(off_frames * m_per_v))  # mel-index shift
+    mel_shifted = shift_mel_np(mel_full, shift_mel)
+    mel_clip = crop_pad_mel_np(mel_shifted, mel_len=mel_len)
+    return mel_clip
+
+
+# ---------------------------------------
+# Model score
+# ---------------------------------------
 @torch.no_grad()
 def compute_score(model: SyncNet, lips: torch.Tensor, mel: torch.Tensor, device: str) -> float:
+    """
+    lips: (T,1,96,96)
+    mel:  (80,mel_len)
+    """
     model.eval()
-    lips = lips.unsqueeze(0).to(device)  # (1,T,3,96,96)
+    lips = lips.unsqueeze(0).to(device)  # (1,T,1,96,96)
     mel = mel.unsqueeze(0).to(device)    # (1,80,mel_len)
     v_emb, a_emb = model(lips, mel)
     return float(torch.nn.functional.cosine_similarity(v_emb, a_emb, dim=1).item())
 
 
-def is_valid_sample(sample_dir: str) -> bool:
-    lips_dir = os.path.join(sample_dir, "lips")
-    mel_path = os.path.join(sample_dir, "mel.npy")
-    if not os.path.isdir(lips_dir):
-        return False
-    if not os.path.isfile(mel_path):
-        return False
-    if len(glob.glob(os.path.join(lips_dir, "*.png"))) == 0:
-        return False
-    return True
+# ---------------------------------------
+# AUC (no sklearn): Mann–Whitney U / rank statistic
+# AUC = P(score_pos > score_neg) + 0.5 * P(equal)
+# ---------------------------------------
+def auc_from_scores(pos_scores: np.ndarray, neg_scores: np.ndarray) -> float:
+    pos_scores = np.asarray(pos_scores, dtype=np.float64)
+    neg_scores = np.asarray(neg_scores, dtype=np.float64)
+    if pos_scores.size == 0 or neg_scores.size == 0:
+        return float("nan")
+
+    all_scores = np.concatenate([pos_scores, neg_scores], axis=0)
+    labels = np.concatenate([np.ones_like(pos_scores), np.zeros_like(neg_scores)], axis=0)
+
+    # ranks with tie handling: average rank
+    order = np.argsort(all_scores)
+    ranks = np.empty_like(order, dtype=np.float64)
+    ranks[order] = np.arange(1, len(all_scores) + 1, dtype=np.float64)
+
+    # tie correction: average ranks for equal values
+    sorted_scores = all_scores[order]
+    i = 0
+    while i < len(sorted_scores):
+        j = i + 1
+        while j < len(sorted_scores) and sorted_scores[j] == sorted_scores[i]:
+            j += 1
+        if j - i > 1:
+            avg = ranks[order[i:j]].mean()
+            ranks[order[i:j]] = avg
+        i = j
+
+    # sum ranks for positives
+    R_pos = ranks[labels == 1].sum()
+    n_pos = (labels == 1).sum()
+    n_neg = (labels == 0).sum()
+
+    # U statistic for positives
+    U_pos = R_pos - n_pos * (n_pos + 1) / 2.0
+    auc = U_pos / (n_pos * n_neg)
+    return float(auc)
 
 
-def pick_negative_sample(all_samples, exclude_sd: str) -> str:
-    if len(all_samples) <= 1:
-        raise ValueError("Need at least 2 valid samples for negative sampling.")
-    while True:
-        cand = random.choice(all_samples)
-        if cand != exclude_sd:
-            return cand
+def safe_mean(arr):
+    arr = np.asarray(arr, dtype=np.float64)
+    return float(arr.mean()) if arr.size else float("nan")
 
 
-# ---------------------------
-# Metrics helpers
-# ---------------------------
-def build_pair_dataset(df: pd.DataFrame):
-    """From per-sample pos & neg_scores(csv string), build pair-level arrays."""
-    scores, labels = [], []
-    for _, row in df.iterrows():
-        pos = float(row["pos"])
-        scores.append(pos); labels.append(1)
-        neg_str = str(row.get("neg_scores", "") or "")
-        if neg_str.strip():
-            for x in neg_str.split(","):
-                x = x.strip()
-                if x:
-                    scores.append(float(x))
-                    labels.append(0)
-    return np.array(scores, dtype=np.float32), np.array(labels, dtype=np.int64)
+def safe_std(arr):
+    arr = np.asarray(arr, dtype=np.float64)
+    return float(arr.std(ddof=1)) if arr.size >= 2 else float("nan")
 
-
-def best_threshold(scores: np.ndarray, labels: np.ndarray):
-    cand = np.unique(scores)
-    best_tau, best_acc = None, -1.0
-    for tau in cand:
-        pred = (scores > tau).astype(np.int64)
-        acc = float((pred == labels).mean())
-        if acc > best_acc:
-            best_acc = acc
-            best_tau = float(tau)
-    return best_tau, best_acc
-
-
-def pair_accuracy(scores: np.ndarray, labels: np.ndarray, tau: float) -> float:
-    pred = (scores > tau).astype(np.int64)
-    return float((pred == labels).mean())
-
-
-def ranking_metrics(df: pd.DataFrame, ks=(1, 5)):
-    pos_scores = df["pos"].astype(float).to_numpy()
-    # parse neg lists
-    neg_lists = []
-    for s in df["neg_scores"].fillna("").astype(str).to_list():
-        if s.strip() == "":
-            neg_lists.append([])
-        else:
-            neg_lists.append([float(x) for x in s.split(",") if x.strip()])
-
-    max_m = max((len(x) for x in neg_lists), default=0)
-    neg_arr = np.full((len(neg_lists), max_m), -np.inf, dtype=np.float32)
-    for i, row in enumerate(neg_lists):
-        neg_arr[i, :len(row)] = row
-
-    rank = 1 + (neg_arr > pos_scores[:, None]).sum(axis=1)  # 1 is best
-    out = {f"recall@{k}": float((rank <= k).mean()) for k in ks}
-    out["mean_rank"] = float(rank.mean())
-    return out
-
-
-def offset_identification_accuracy(model: SyncNet, sample_dirs, device: str, num_frames: int, mel_len: int, offsets):
-    """
-    For each sample:
-      - load lips
-      - load full mel
-      - for each offset, shift full mel, crop/pad to mel_len, score
-      - predict offset = argmax score
-      - success if predicted == 0
-    """
-    offsets = list(offsets)
-    ok, hit0 = 0, 0
-    per_sample = []  # optional debug
-
-    for sd in sample_dirs:
-        try:
-            if not is_valid_sample(sd):
-                continue
-            lips = load_lips(os.path.join(sd, "lips"), num_frames=num_frames)
-            mel_full = load_mel_full(os.path.join(sd, "mel.npy"))  # (80, T)
-
-            scores = []
-            for off in offsets:
-                mel_shifted = shift_mel_np(mel_full, off)
-                mel_clip = crop_pad_mel_np(mel_shifted, mel_len=mel_len)
-                mel_t = torch.from_numpy(mel_clip).float()
-                scores.append(compute_score(model, lips, mel_t, device))
-
-            pred_off = offsets[int(np.argmax(scores))]
-            ok += 1
-            hit0 += int(pred_off == 0)
-
-            per_sample.append({
-                "sample_dir": sd,
-                "pred_offset": pred_off,
-                "scores": scores
-            })
-
-        except Exception:
-            continue
-
-    acc = (hit0 / ok) if ok > 0 else 0.0
-    return acc, ok, per_sample
-
-def _load_yaml(path: str):
-    p = Path(path).expanduser()
-
-    if not p.is_absolute():
-        proj_root = Path(__file__).resolve().parents[1]
-        p = (proj_root / p).resolve()
-    with open(p, "r") as f:
-        return yaml.safe_load(f)
 
 def main():
     parser = argparse.ArgumentParser()
+
+    # config / paths
     parser.add_argument("--config", type=str, default="configs/exp.yaml")
-    parser.add_argument("--root", default="data/train", help="sample root dir")
-    parser.add_argument("--ckpt", default="logs/checkpoints/syncnet_ckpt.pth", help="checkpoint path")
-    parser.add_argument("--sample", default="", help="run only one sample dir (optional)")
+    parser.add_argument("--root", default=None, help="GRID processed root (contains s*_processed)")
+    parser.add_argument("--ckpt", default=None, help="checkpoint path")
+
+    # IMPORTANT: evaluate TEST only (speaker-disjoint split 28/3/3)
+    parser.add_argument("--train_spk", type=int, default=28)
+    parser.add_argument("--val_spk", type=int, default=3)
 
     # data params
     parser.add_argument("--num_frames", type=int, default=5)
     parser.add_argument("--mel_len", type=int, default=16)
-    parser.add_argument("--max_samples", type=int, default=0, help="0 means all")
-    parser.add_argument("--neg_k", type=int, default=5, help="number of negative mels per sample (mean over K)")
-    parser.add_argument("--seed", type=int, default=42, help="random seed for negative sampling")
+    parser.add_argument("--max_samples", type=int, default=0, help="0 means all test samples")
+    parser.add_argument("--seed", type=int, default=42)
 
-    # metrics options
-    parser.add_argument("--do_pair", action="store_true", help="compute Pair classification accuracy")
-    parser.add_argument("--do_rank", action="store_true", help="compute Ranking metrics (Recall@K)")
-    parser.add_argument("--do_offset", action="store_true", help="compute Offset identification accuracy (shift sweep)")
+    # evaluation controls
+    parser.add_argument("--offsets", default="-5,-4,-3,-2,-1,0,1,2,3,4,5",
+                        help="comma-separated FRAME offsets for offset curve & offset-id acc")
+    parser.add_argument("--save_offset_csv", default="logs/offset_sweep_test.csv",
+                        help="save per-sample offset sweep scores (for plotting)")
+    parser.add_argument("--save_summary_csv", default="logs/eval_summary_test.csv",
+                        help="save aggregated summary metrics")
 
-    parser.add_argument("--tau", type=float, default=None, help="pair threshold; if None, tune on current set")
-    parser.add_argument("--rank_ks", default="1,5", help="comma-separated ks for Recall@K")
-    parser.add_argument("--offsets", default="-5,-4,-3,-2,-1,0,1,2,3,4,5", help="comma-separated integer offsets")
-
-    parser.add_argument("--save_csv", default="logs/inference_scores_with_neg.csv", help="save per-sample pos/neg scores")
-    parser.add_argument("--save_offset_csv", default="", help="optional: save per-sample sweep scores to csv")
     args = parser.parse_args()
 
     # -------------------------
@@ -276,178 +310,242 @@ def main():
     # -------------------------
     cfg = _load_yaml(args.config) if args.config else {}
 
-    # dataset.root -> args.root
-    if "dataset" in cfg and "root" in cfg["dataset"]:
-        args.root = cfg["dataset"]["root"]
+    if args.root is None:
+        args.root = cfg.get("dataset", {}).get("root", "data/grid_processed")
 
-    # paths.ckpt -> args.ckpt (있으면)
-    if "paths" in cfg and "ckpt" in cfg["paths"]:
-        args.ckpt = cfg["paths"]["ckpt"]
+    if args.ckpt is None:
+        args.ckpt = cfg.get("paths", {}).get("ckpt", "logs/checkpoints/best_syncnet_ckpt.pth")
 
-    # common
-    if "common" in cfg:
-        c = cfg["common"]
-        if "seed" in c:
-            args.seed = c["seed"]
-        if "num_frames" in c:
-            args.num_frames = c["num_frames"]
-        if "mel_len" in c:
-            args.mel_len = c["mel_len"]
+    c = cfg.get("common", {})
+    args.seed = int(c.get("seed", args.seed))
+    args.num_frames = int(c.get("num_frames", args.num_frames))
+    args.mel_len = int(c.get("mel_len", args.mel_len))
 
-    # eval
-    if "eval" in cfg:
-        e = cfg["eval"]
-        for k in ["neg_k", "do_pair", "do_rank", "do_offset", "save_csv", "save_offset_csv"]:
-            if k in e:
-                setattr(args, k, e[k])
+    # offsets can be overridden by cfg.eval.offsets (frame offsets)
+    e = cfg.get("eval", {})
+    if "offsets" in e:
+        args.offsets = ",".join(str(x) for x in e["offsets"])
 
-        # YAML에서 list로 받는 걸 기존 코드(split(","))와 호환되게 문자열로 변환
-        if "rank_ks" in e:
-            args.rank_ks = ",".join(str(x) for x in e["rank_ks"])
-        if "offsets" in e:
-            args.offsets = ",".join(str(x) for x in e["offsets"])
-
-
-    # default: all metrics
-    if not (args.do_pair or args.do_rank or args.do_offset):
-        args.do_pair = args.do_rank = args.do_offset = True
-
-    random.seed(args.seed)
+    rng = random.Random(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using:", device)
 
+    # -------------------------
     # Load model
-    model = SyncNet(embed_dim=256).to(device)
+    # -------------------------
+    model = SyncNet(embed_dim=int(cfg.get("model", {}).get("embed_dim", 256))).to(device)
+
     state = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(state)
+    if isinstance(state, dict) and "model" in state:
+        model.load_state_dict(state["model"])
+    else:
+        model.load_state_dict(state)
     print(f"Loaded checkpoint: {args.ckpt}")
 
-    # Build sample list
-    if args.sample:
-        samples = [args.sample]
-    else:
-        samples = sorted([
-            os.path.join(args.root, d) for d in os.listdir(args.root)
-            if os.path.isdir(os.path.join(args.root, d))
-        ])
-        if args.max_samples and args.max_samples > 0:
-            samples = samples[:args.max_samples]
+    # -------------------------
+    # Collect all valid samples (recursive)
+    # -------------------------
+    all_samples = [sd for sd in collect_sample_dirs(args.root) if is_valid_sample(sd)]
+    if len(all_samples) == 0:
+        print(f"No valid samples found under: {args.root}")
+        return
 
-    # Pool for negative sampling (valid only)
-    valid_pool = [
-        sd for sd in sorted([
-            os.path.join(args.root, d) for d in os.listdir(args.root)
-            if os.path.isdir(os.path.join(args.root, d))
-        ]) if is_valid_sample(sd)
-    ]
+    # speaker-disjoint split (28/3/3), then evaluate TEST ONLY
+    train_s, val_s, test_s, (train_spk, val_spk, test_spk) = split_by_speaker_count(
+        all_samples, seed=args.seed, n_train=args.train_spk, n_val=args.val_spk
+    )
+    samples = test_s
+
+    print(f"[Split] speakers: train={len(train_spk)} val={len(val_spk)} test={len(test_spk)}")
+    print(f"[EvalSplit=TEST] N={len(samples)}")
+    print(f"[Test speakers]: {test_spk}")
+
+    if args.max_samples and args.max_samples > 0:
+        samples = samples[:args.max_samples]
+        print(f"[Eval] max_samples applied -> N={len(samples)}")
+
+    offsets_f = [int(x) for x in args.offsets.split(",") if x.strip()]
+    if 0 not in offsets_f:
+        raise ValueError("offsets must include 0 (for gt_offset=0).")
+
+    offsets_f_sorted = offsets_f[:]  # preserve given order for columns
+    zero_idx = offsets_f_sorted.index(0)
 
     # ---------------------------------------
-    # Step 1) Per-sample inference (pos + K neg)
-    #   -> needed for (A) and (C)
+    # Evaluate per-sample sweep on TEST
+    #   -> enables:
+    #   1) Offset Curve (mean curve)
+    #   2) Offset Margin (per-sample + mean/std)
+    #   3) Offset Identification Accuracy
+    #   4) AUC (pos=score@0, neg=scores@others)
     # ---------------------------------------
-    results = []
+    rows = []
     ok, skip = 0, 0
+
+    all_pos = []
+    all_neg = []
+    margins = []
+    hit0 = 0  # for offset-id acc
 
     for sd in samples:
         try:
-            if not is_valid_sample(sd):
-                raise ValueError("missing lips/*.png or mel.npy")
+            lips = load_lips(os.path.join(sd, "lips"), num_frames=args.num_frames)
+            mel_full = load_mel_full_np(os.path.join(sd, "mel.npy"))
 
-            lips_dir = os.path.join(sd, "lips")
-            mel_path = os.path.join(sd, "mel.npy")
+            # score sweep across offsets
+            sweep_scores = []
+            for off_f in offsets_f_sorted:
+                mel_np = mel_clip_at_offset_frames(sd, mel_full, args.mel_len, off_frames=off_f)
+                mel_t = torch.from_numpy(mel_np).float()
+                sweep_scores.append(compute_score(model, lips, mel_t, device))
 
-            lips = load_lips(lips_dir, num_frames=args.num_frames)
-            mel_pos = load_mel(mel_path, mel_len=args.mel_len)
-            pos = compute_score(model, lips, mel_pos, device)
+            sweep_scores = np.asarray(sweep_scores, dtype=np.float64)
 
-            neg_scores = []
-            for _ in range(max(1, args.neg_k)):
-                neg_sd = pick_negative_sample(valid_pool, exclude_sd=sd)
-                neg_mel_path = os.path.join(neg_sd, "mel.npy")
-                mel_neg = load_mel(neg_mel_path, mel_len=args.mel_len)
-                neg_scores.append(compute_score(model, lips, mel_neg, device))
-
-            neg_mean = float(np.mean(neg_scores))
+            # pos/neg for margin + AUC
+            pos = float(sweep_scores[zero_idx])
+            neg_scores = np.delete(sweep_scores, zero_idx)
+            neg_mean = float(neg_scores.mean()) if neg_scores.size else float("nan")
             margin = float(pos - neg_mean)
 
-            results.append({
+            # offset-id: argmax offset
+            pred_idx = int(np.argmax(sweep_scores))
+            pred_off = int(offsets_f_sorted[pred_idx])
+            hit0 += int(pred_off == 0)
+
+            # accumulate for global metrics
+            all_pos.append(pos)
+            all_neg.extend(list(neg_scores))
+            margins.append(margin)
+
+            # per-sample row for csv
+            row = {
                 "sample_dir": sd,
-                "pos": pos,
+                "pred_offset": pred_off,
+                "pos_s0": pos,
                 "neg_mean": neg_mean,
                 "margin": margin,
-                "neg_k": int(max(1, args.neg_k)),
-                "neg_scores": ",".join([f"{v:.6f}" for v in neg_scores]),
-            })
-            ok += 1
+            }
+            for i, off_f in enumerate(offsets_f_sorted):
+                row[f"s_{off_f}"] = float(sweep_scores[i])
+            rows.append(row)
 
-        except Exception as e:
-            print(f"⚠ Skip: {sd} | Reason: {e}")
+            ok += 1
+        except Exception as ex:
+            print(f"⚠ Skip: {sd} | Reason: {ex}")
             skip += 1
 
-    print(f"\nPer-sample scoring done. OK={ok} SKIP={skip}")
+    print(f"\nOffset sweep done on TEST. OK={ok} SKIP={skip}")
 
-    df = pd.DataFrame(results)
-    if df.empty:
+    if ok == 0:
         print("No valid samples processed. Exiting.")
         return
 
-    os.makedirs(os.path.dirname(args.save_csv), exist_ok=True)
-    df = df.sort_values("margin", ascending=False)
-    df.to_csv(args.save_csv, index=False)
-    print(f"Saved per-sample scores: {args.save_csv}")
+    df = pd.DataFrame(rows)
 
     # ---------------------------------------
-    # Step 2) (A) Pair classification accuracy
+    # 1) Offset Curve (mean +/- std over TEST)
     # ---------------------------------------
-    if args.do_pair:
-        pair_scores, pair_labels = build_pair_dataset(df)
-        if args.tau is None:
-            tau, tuned_acc = best_threshold(pair_scores, pair_labels)
+    curve_mean = []
+    curve_std = []
+    for off_f in offsets_f_sorted:
+        vals = df[f"s_{off_f}"].to_numpy(dtype=np.float64)
+        curve_mean.append(safe_mean(vals))
+        curve_std.append(safe_std(vals))
+
+    # ---------------------------------------
+    # 2) Offset Margin summary
+    # ---------------------------------------
+    margins_np = np.asarray(margins, dtype=np.float64)
+    margin_mean = safe_mean(margins_np)
+    margin_std = safe_std(margins_np)
+
+    # ---------------------------------------
+    # 3) Offset Identification Accuracy
+    # ---------------------------------------
+    offset_id_acc = hit0 / float(ok)
+
+    # ---------------------------------------
+    # 4) AUC (offset-based ROC)
+    #   pos scores: score@0 per sample (N=ok)
+    #   neg scores: all non-zero offset scores pooled (N=ok*(len(offsets)-1))
+    # ---------------------------------------
+    auc = auc_from_scores(np.asarray(all_pos, dtype=np.float64), np.asarray(all_neg, dtype=np.float64))
+
+    # ---------------------------------------
+    # Save CSVs
+    # ---------------------------------------
+    os.makedirs(os.path.dirname(args.save_offset_csv), exist_ok=True)
+    df.to_csv(args.save_offset_csv, index=False)
+    print(f"Saved per-sample offset sweep: {args.save_offset_csv}")
+
+    summary = {
+        "split": "test",
+        "n_samples": ok,
+        "offsets_frames": [int(x) for x in offsets_f_sorted],
+        "offset_curve_mean": curve_mean,
+        "offset_curve_std": curve_std,
+        "margin_mean": margin_mean,
+        "margin_std": margin_std,
+        "offset_id_acc": float(offset_id_acc),
+        "auc": float(auc),
+        "ckpt": args.ckpt,
+        "root": args.root,
+        "num_frames": int(args.num_frames),
+        "mel_len": int(args.mel_len),
+        "seed": int(args.seed),
+        "train_speakers": train_spk,
+        "val_speakers": val_spk,
+        "test_speakers": test_spk,
+    }
+
+    # summary csv (one row, human-readable columns)
+    out_row = {
+        "split": "test",
+        "N": ok,
+        "margin_mean": margin_mean,
+        "margin_std": margin_std,
+        "offset_id_acc": float(offset_id_acc),
+        "auc": float(auc),
+        "offsets": args.offsets,
+        "ckpt": args.ckpt,
+    }
+    for i, off_f in enumerate(offsets_f_sorted):
+        out_row[f"curve_mean_s{off_f}"] = curve_mean[i]
+        out_row[f"curve_std_s{off_f}"] = curve_std[i]
+
+    os.makedirs(os.path.dirname(args.save_summary_csv), exist_ok=True)
+    pd.DataFrame([out_row]).to_csv(args.save_summary_csv, index=False)
+    print(f"Saved summary: {args.save_summary_csv}")
+
+    # ---------------------------------------
+    # Print summary (console)
+    # ---------------------------------------
+    print("\n=== TEST EVAL SUMMARY ===")
+    print(f"- Split: TEST (speaker-disjoint 28/3/3)")
+    print(f"- N: {ok}")
+    print(f"- Offsets (frames): {offsets_f_sorted}")
+
+    print("\n[1] Offset Curve (mean ± std)")
+    for off_f, m, s in zip(offsets_f_sorted, curve_mean, curve_std):
+        if np.isnan(s):
+            print(f"  off {off_f:+d}: mean={m:.4f}")
         else:
-            tau, tuned_acc = args.tau, None
-        acc = pair_accuracy(pair_scores, pair_labels, tau)
-        msg = f"[A] Pair-Cls Accuracy: {acc:.4f} (tau={tau:.6f})"
-        if tuned_acc is not None:
-            msg += f"  [tuned on same set: {tuned_acc:.4f}]"
-        print(msg)
+            print(f"  off {off_f:+d}: mean={m:.4f} ± {s:.4f}")
 
-    # ---------------------------------------
-    # Step 3) (C) Ranking metrics
-    # ---------------------------------------
-    if args.do_rank:
-        ks = [int(x) for x in args.rank_ks.split(",")]
-        rm = ranking_metrics(df, ks=ks)
-        print("[C] Ranking:", ", ".join([f"{k}={v:.4f}" for k, v in rm.items()]))
+    print("\n[2] Offset Margin")
+    if np.isnan(margin_std):
+        print(f"  mean={margin_mean:.4f}")
+    else:
+        print(f"  mean={margin_mean:.4f} ± {margin_std:.4f}")
 
-    # ---------------------------------------
-    # Step 4) (B) Offset identification accuracy
-    # ---------------------------------------
-    if args.do_offset:
-        offsets = [int(x) for x in args.offsets.split(",")]
-        acc_off, n_used, per_sample = offset_identification_accuracy(
-            model=model,
-            sample_dirs=samples,
-            device=device,
-            num_frames=args.num_frames,
-            mel_len=args.mel_len,
-            offsets=offsets
-        )
-        print(f"[B] Offset-Id Accuracy: {acc_off:.4f} (N={n_used}, gt_offset=0)")
+    print("\n[3] Offset Identification Accuracy")
+    print(f"  acc={offset_id_acc:.4f}  (baseline≈1/{len(offsets_f_sorted)}={1.0/len(offsets_f_sorted):.4f})")
 
-        if args.save_offset_csv:
-            rows = []
-            for r in per_sample:
-                row = {"sample_dir": r["sample_dir"], "pred_offset": r["pred_offset"]}
-                for i, off in enumerate(offsets):
-                    row[f"s_{off}"] = float(r["scores"][i])
-                rows.append(row)
-            odf = pd.DataFrame(rows)
-            os.makedirs(os.path.dirname(args.save_offset_csv), exist_ok=True)
-            odf.to_csv(args.save_offset_csv, index=False)
-            print(f"Saved sweep scores: {args.save_offset_csv}")
+    print("\n[4] AUC (offset-based ROC)")
+    print(f"  AUC={auc:.4f}")
 
 
 if __name__ == "__main__":

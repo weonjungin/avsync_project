@@ -60,6 +60,8 @@ pip install librosa
 ```
 
 ---
+cd ~/projects/avsync_project
+conda activate syncnet
 
 # 전처리
 python scripts/prepare_avspeech.py --config configs/exp.yaml
@@ -68,7 +70,10 @@ python scripts/prepare_avspeech.py --config configs/exp.yaml
 python scripts/train_syncnet.py --config configs/exp.yaml
 
 # 평가
-python scripts/eval_metrics.py --config configs/exp.yaml
+python scripts/eval_metrics.py --config configs/exp.yaml : test split만 평가 
+python scripts/eval_metrics.py --config configs/exp.yaml --split test
+python scripts/eval_metrics.py --split all
+
 
 # 추론
 python scripts/inference_syncnet.py --config configs/exp.yaml

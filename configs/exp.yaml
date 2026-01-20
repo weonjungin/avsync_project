@@ -1,25 +1,43 @@
 dataset:
-  root: data/avspeech_full_me25
-  csv: data/raw/avspeech/avspeech_train.csv
+  name: grid
+  root: /media/HDD/jiweon/GRID/processed_syncnet
 
 paths:
   ckpt: logs/checkpoints/syncnet_ckpt.pth
 
 common:
   seed: 42
-  num_frames: 25
-  mel_len: 16
+  num_frames: 5      # Twin (sliding window length in video frames)
+  mel_len: null      # derive automatically from meta (fps, sr, hop_length)
 
 prepare:
-  out: data/avspeech_full_me25
+  mode : grid
+  grid_root: /media/HDD/jiweon/GRID/raw/data
+  out: /media/HDD/jiweon/GRID/processed_syncnet
   limit: null
-  min_lip_frames: 25
+  min_lip_frames: 5  # must be >= Twin
+
+  # mel params (meta에 저장되므로 최소한만 명시)
+  sr: 16000
+  hop_length: 256
+  n_fft: 1024
+  n_mels: 80
+
+  # roi params (딱 필요한 것만)
+  roi_size: 96
+  smooth_alpha: 0.4
+
+  keep_wav: true
 
 train:
   batch_size: 8
   lr: 1e-4
   epochs: 30
+
+  loss: contrastive   # 또는 pair_infonce
+  margin: 0.3
   temperature: 0.07
+  
   hard_k: 5
   save_dir: logs/checkpoints
   ckpt_name: syncnet_ckpt.pth
@@ -27,17 +45,17 @@ train:
 eval:
   do_pair: true
   do_rank: true
-  do_offset: false
+  do_offset: true
 
   neg_k: 5
   rank_ks: [1, 5, 10]
   offsets: [-5,-4,-3,-2,-1,0,1,2,3,4,5]
 
-  save_csv: logs/eval_scores_full.csv
-  save_offset_csv: logs/eval_offsets_full.csv
+  save_csv: logs/eval_scores_grid
+  save_offset_csv: logs/eval_offsets_grid.csv
 
 inference:
   max_samples: 50
   neg_k: 5
-  save_csv: logs/inference_scores_full.csv
-  sample: ""   # optional
+  save_csv: logs/inference_scores_grid.csv
+  sample: ""
