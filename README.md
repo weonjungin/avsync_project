@@ -6,7 +6,7 @@ Audio-visual 동기화 연구의 출발점. AVSpeech 데이터셋 기반으로 S
 
 초기에는 대규모 화자 다양성을 가진 [AVSpeech](https://looking-to-listen.github.io/avspeech/) 데이터셋으로 SyncNet을 학습하려 했으나, 유튜브 다운로드 정책 변경으로 데이터 수급이 중단되며 프로젝트가 중단되었습니다.
 
-이후 GRID / HDTF 데이터셋으로 전환해 연구를 이어갔고, 그 결과물이 **[lip-sync-score](https://github.com/weonjungin/lip-sync-score)**입니다. 거기서 개발한 SyncNetTemporal(SyncLT)은 최종적으로 **[ADLip2](https://github.com/weonjungin/ADLip2)**의 립싱크 손실 함수로 사용되었습니다.
+이후 GRID / HDTF 데이터셋으로 전환해 연구를 이어갔고, 그 결과물이 [lip-sync-score](https://github.com/weonjungin/lip-sync-score)입니다. 거기서 개발한 SyncNetTemporal(SyncLT)은 최종적으로 [ADLip2](https://github.com/weonjungin/ADLip2)의 립싱크 손실 함수로 사용되었습니다.
 
     avsync_project (AVSpeech, 중단)
           │  데이터 수급 문제로 GRID/HDTF 전환
